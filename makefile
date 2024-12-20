@@ -1,7 +1,7 @@
 #!env make
 
 #
-# flos/liboptparse99
+# hippie68/liboptparse99
 #
 # Copyright (c) 2024 Armands Arseniuss Skolmeisters <arseniuss@arseniuss.id.lv>
 # Copyright (c) 2022 hippie68 (https://github.com/hippie68/optparse99)
@@ -28,7 +28,7 @@
 
 include config.mk
 
-TARGET = lib/liboptparse99.a
+TARGET = lib/hippie68/liboptparse99.a
 
 tempdir != mktemp -d
 tempfile != tempfile

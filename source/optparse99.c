@@ -26,7 +26,7 @@ SOFTWARE.
 
 // More information, including example code, is found in the file "README.md".
 
-#include <flos/optparse99.h>
+#include <hippie68/optparse99.h>
 
 #include <assert.h>
 #include <ctype.h>

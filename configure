@@ -1,0 +1,434 @@
+#!/bin/sh
+
+# when any command fails, the shell immediately exists
+set -e
+
+progname="$0"
+progdir=$(dirname "$0")
+
+alias echo=$(which echo)
+
+do_local_setup=0
+on_exit_cmd=""
+
+WITH_DEPLIBS=""
+VARS=""
+
+trap 'excode=$?; if [ $excode != 0 ]; then rm -vf config.mk; fi' EXIT INT HUP
+
+setvar() {
+    local name="$1"
+    local defval="$2"
+
+    ! test -z "$(eval echo \$$name)" || eval "$name=\"$defval\""
+}
+
+setpathvar() {
+    local name="$1"
+    local defval="${2#./}"
+
+    ! test -z "$(eval echo \$$name)" || eval "$name=\"$defval\""
+}
+
+addvar() {
+    local name="$1"
+    local value="$2"
+    
+    setvar "$name" "$value"
+    VARS="$VARS $name=$value"
+}
+
+setechovar() {
+    setvar "$1" "$2"
+    eval echo \"\$$1\"
+}
+
+setechopathvar() {
+    setpathvar "$1" "$2"
+    eval echo \"\$$1\"
+}
+
+prefix() {
+	local prefix="$1 "
+
+	[ -z "$prefix" ] && prefix=$PREFIX
+
+	while IFS= read line
+	do
+		echo "$prefix$line"
+	done
+}
+
+msg() {
+    echo -n "$1 ... " 1>&2
+}
+
+check_msg() {
+    echo -n "Checking $1 ... " 1>&2
+}
+
+check_result() {
+    local text="$1"
+
+    if [ ! -z "$text" ]; then
+        echo "$text" 1>&2
+    else
+        echo "ok" 1>&2
+    fi
+}
+
+check_error() {
+    echo failed 1>&2
+    if [ ! -z "$1" ]; then
+        echo "error: $1" 1>&2
+    fi
+    exit 1
+}
+
+check_program() {
+    local var="$1"
+    local name="$2"
+
+    check_msg "for $name"
+
+    echo -n "$var = "
+
+    which $name > /dev/null && check_result $name && \
+        setechovar "$var" "$name" || \
+        check_error "not found"
+}
+
+setup_vars() {
+    for var in $VARS; do
+        echo $var
+    done
+}
+
+collect_local() {
+    DEPLIBS_COUNT=$(echo "$DEPLIBS" | wc -w)
+
+    mkdir -p deps
+
+    i=0
+    while [ "$i" -lt $DEPLIBS_COUNT ]; do
+        i=$(( i + 1 ))
+        changed=0
+
+        name=$(echo "$DEPLIBS" | cut -d\  -f$i)
+        check_msg "dependency library $name"
+
+        url=$(eval echo \"\$${name}_URL\")
+        if [ -z "$url" ]; then
+            check_error "URL is not set for library $name"
+        fi
+
+        dir=$(eval echo \"\$${name}_DIR\")
+        if [ -z "$dir" ]; then
+            check_error "archive directory is not set for library $name"
+        fi
+
+        if [ ! -f deps/$name.zip ]; then
+            echo 1>&2
+            echo "Downloading $name.zip ..." 1>&2
+
+            wget -nc "$url" -P deps -O deps/$name.zip 2>&1 | prefix "[$name wget]" || true
+            changed=1
+        fi
+
+        if [ ! -d deps/$dir/ ]; then
+            echo "Unzipping $name ..." 1>&2
+
+            mkdir deps/$dir/
+            unzip -q deps/$name.zip -d deps 2>&1 | prefix "[$name unzip]"
+            changed=1
+        fi
+
+        if [ $changed -eq 0 ]; then
+            check_result
+        fi
+
+        WITH_DEPLIBS="$WITH_DEPLIBS --with-$name=../$dir"
+    done
+}
+
+setup_local() {
+    local includes=""
+
+    DEPLIBS_COUNT=$(echo "$DEPLIBS" | wc -w)
+
+    mkdir -p deps
+
+    i=0
+    while [ "$i" -lt $DEPLIBS_COUNT ]; do
+        i=$(( i + 1 ))
+
+        name=$(echo "$DEPLIBS" | cut -d\  -f$i)
+        echo "Making dependency library $name ..." 1>&2
+
+        url=$(eval echo \"\$${name}_URL\")
+        dir=$(eval echo \"\$${name}_DIR\")
+        deps=$(eval echo \"\$${name}_DEPS\")
+
+        with_flags=
+
+        for i in $deps; do
+            with_flags="$with_flags --with-$i=../$dir/"
+        done
+
+        oldpath=$(pwd)
+        cd "deps/$dir";
+
+        ( test -f configure || ./bootstrap ) 2>&1 | prefix "[$name bootstrap]"
+
+        ( ./configure $with_flags ) 2>&1 | prefix "[$name configure]"
+        
+        ( make ) 2>&1 | prefix "[$name make]"
+        ( make check ) 2>&1 | prefix "[$name make check]"
+        ( make install ) 2>&1 | prefix "[$name make install]"
+
+        cd $oldpath
+    done
+}
+
+setup_deps() {
+    local config_file="$1"
+
+    DEPLIBS_COUNT=$(echo "$DEPLIBS" | wc -w)
+
+    i=0
+    while [ "$i" -lt $DEPLIBS_COUNT ]; do
+        i=$(( i + 1 ))
+
+        name=$(echo "$DEPLIBS" | cut -d\  -f$i)
+
+        msg "Setting dependency $name"
+
+        if [ "$do_local_setup" -eq 1 ]; then
+            dir=$(eval echo \"\$${name}_DIR\")
+
+            [ -z "$dir" ] && continue;
+
+            if [ -d deps/$dir/include ]; then
+                echo "${name}_INCLUDE=deps/$dir/include" >> $config_file
+            fi
+
+            if [ -d deps/$dir/lib ]; then
+                echo "${name}_LIB=deps/$dir/lib" >> $config_file
+            fi
+        else
+            if [ ! -z $(eval echo \${with_$name+x}) ]; then
+                base=$(eval echo \${with_$name})
+
+                if [ -d $base/include ]; then
+                   addvar "${name}_INCLUDE" "$base/include"
+                fi
+
+                if [ -d $base/lib ]; then
+                   addvar "${name}_LIB" "$base/lib"
+                fi
+
+                if [ ! -f $base/lib/$name.a ]; then
+                    check_error "library $base/lib/$name.a do not exist"
+                fi
+            else
+                check_error "location of dependency $name is not provided --with-$name=DIR"
+            fi
+        fi
+
+        check_result
+    done  
+}
+
+help() {
+    echo "Usage: $progname [OPTIONS] [VAR=VALUE] ..."
+}
+
+. ./package.cfg
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+    -h|--help)
+        help
+        exit 0
+        ;;
+    --local)
+        do_local_setup=1
+        ;;
+    --srcdir=*)
+        srcdir="${1#*=}"
+        ;;
+    --prefix=*)
+        prefix="${1#*=}"
+        ;;
+    --exec-prefix=*)
+        exec_prefix="${1#*=}"
+        ;;
+    --bindir=*)
+        bindir="${1#*=}"
+        ;;
+    --sbindir=*)
+        sbindir="${1#*=}"
+        ;;
+    --sysconfdir=*)
+        sysconfdir="${1#*=}"
+        ;;
+    --localstatedir=*)
+        localstatedir="${1#*=}"
+        ;;
+    --runstatedir=*)
+        runstatedir="${1#*=}"
+        ;;
+    --libdir=*)
+        libdir="${1#*=}"
+        ;;
+    --includedir=*)
+        includedir="${1#*=}"
+        ;;
+    --datarootdir=*)
+        datarootdir="${1#*=}"
+        ;;
+    --datadir=*)
+        datadir="${1#*=}"
+        ;;
+    --docdir=*)
+        docdir="${1#*=}"
+        ;;
+    --with-*=*)
+        feature=${1%=*}
+        feature=${feature#--with-}
+        value=${1#*=}
+        
+        eval with_$feature=\"$value\"
+
+        if [ "${DEPLIBS#*"$feature"}" = "$DEPLIBS" ]; then
+            printf "%s: illegal option: %s\n" "$progname" "$1" 1>&2
+            echo -ne "\nRecognised options:\n" 1>&2
+            for i in $DEPLIBS; do
+                printf "\t--with-$i=DIR\tlocation of $i library\n"
+            done
+            exit 1
+        fi
+        ;;
+    --with-*)
+            printf "%s: illegal option: %s\n" "$progname" "$1" 1>&2
+            echo -ne "\nRecognised options:\n" 1>&2
+            for i in $DEPLIBS; do
+                printf "\t--with-$i=DIR\tlocation of $i library\n"
+            done
+            exit 1
+        ;;
+    --*|-*)
+        printf "%s: illegal option: %s\n" "$progname" "$1" 1>&2
+        exit 1
+        ;;
+    *=*)
+        eval ${1%%=*}=\"${1#*=}\"
+        ;;
+    *)
+        printf "%s: unrecognised argument: %s\n" "$progname" "$1" 1>&2
+        exit 1
+        ;;
+    esac
+    shift
+done
+
+#
+# Base directories
+#
+check_msg architecture
+test -z "$ARCH" && ARCH=$(uname -m)
+check_result $ARCH
+
+check_msg "operating system"
+test -z "$OS" && OS=$(uname -o)
+check_result $OS
+
+setpathvar srcdir .
+setpathvar prefix .
+
+setpathvar srcdir $(pwd)
+setpathvar exec_prefix "$prefix"
+setpathvar datarootdir "$prefix/share"
+
+setvar CFLAGS "-Wall -Wshadow -Wextra"
+setvar LDFLAGS
+setvar LIBS
+setvar INCLUDES
+
+# Append defaults
+CFLAGS="$CFLAGS -std=c99 -DVERSION=\"$version\""
+LDFLAGS="$LDFLAGS "
+
+cat <<EOF > $srcdir/config.mk
+#
+# WARNING: this file is generate by $progname
+#
+
+PACKAGE = $package
+VERSION = $version
+
+EOF
+
+{
+    check_program AR ar
+    check_program AWK awk
+    check_program CC cc
+    check_program COV gcov
+    check_program LD cc
+    check_program PP cpp
+    check_program PROVE prove
+} >> $srcdir/config.mk
+
+cat <<EOF >> $srcdir/config.mk
+CFLAGS = $CFLAGS
+LDFLAGS = $LDFLAGS
+
+GEN = 
+LIBS = $LIBS
+
+
+EOF
+
+if [ "$do_local_setup" -eq 1 ]; then
+    echo "# local setup " >> $srcdir/config.mk
+    collect_local
+    setup_local
+fi
+
+if [ -x config.cfg ]; then
+    . setup.cfg
+fi
+
+if [ -d configure.d ] && [ -f configure.d/*.cfg.sh ]; then
+    echo "# configuration scripts " >> $srcdir/config.mk
+    for i in configure.d/*.cfg.sh; do
+        . $i 2>&1 | prefix "[$i]"
+    done
+fi
+
+setup_deps "$srcdir/config.mk"
+setup_vars "$VARS" >> $srcdir/config.mk
+
+cat<<EOF >> $srcdir/config.mk
+
+root = $(setechovar ROOT /)
+
+srcdir = $(setechovar srcdir .)
+builddir = $(setechovar builddir build)
+
+prefix = $prefix
+exec_prefix = $exec_prefix
+
+bindir = $(setechopathvar bindir "$exec_prefix/bin")
+sbindir = $(setechopathvar sbindir "$exec_prefix/sbin")
+sysconfdir = $(setechopathvar sysconfdir "$prefix/etc")
+localstatedir = $(setechopathvar localstatedir "$prefix/var")
+runstatedir = $(setechopathvar runstatedir "$prefix/run")
+libdir = $(setechopathvar libdir "$exec_prefix/lib")
+includedir = $(setechopathvar includedir "$prefix/include")
+datarootdir = $datarootdir
+datadir = $(setechopathvar datadir "$datarootdir")
+docdir = $(setechopathvar docdir "$datarootdir/doc/$package")
+EOF
+
+echo "Configured."

@@ -1,0 +1,9 @@
+.vscode/
+*.a
+*.lst
+*.o
+*.tar.gz
+build/
+config.mk
+deps/
+nbproject/
